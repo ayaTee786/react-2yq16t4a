@@ -25,6 +25,8 @@ function sbApi(url,key){
       headers:{...h(tok),"Prefer":"count=exact","Range":"0-0"}})
       .then(r=>{const cr=r.headers.get("content-range");
         return cr?parseInt(cr.split("/")[1]||"0"):0;}).catch(()=>0),
+    counts:tok=>fetch(`${url}/rest/v1/rpc/handsole_table_counts`,{method:"POST",headers:h(tok),body:"{}"})
+      .then(async r=>{const j=await r.json().catch(()=>null);if(!r.ok||!j)throw new Error(j?.message||`Count request failed: ${r.status}`);return j;}),
   };
 }
 
@@ -928,8 +930,13 @@ function upperRowMatchesFarma(row,target){
   return vals.some(v=>aliases.some(a=>v===a||v.includes(a)));
 }
 
-function Thumb({src,onClick,sz=40}){return src?<img src={src} onClick={onClick} alt="" style={{width:sz,height:sz,borderRadius:0,objectFit:"cover",cursor:onClick?"pointer":"default",border:`1px solid ${C.borderL}`,display:"block",flexShrink:0}}/>:<div style={{width:sz,height:sz,borderRadius:0,background:"#F3F3F1",border:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><i className="ti ti-camera" style={{fontSize:14,color:C.dim}}/></div>;}
-function VideoThumb({src,sz=40,onClick}){return src?<div onClick={onClick} style={{width:sz,height:sz,borderRadius:0,position:"relative",overflow:"hidden",border:`1px solid ${C.borderL}`,background:"#000",display:"block",flexShrink:0,cursor:onClick?"pointer":"default"}}><video src={src} muted preload="metadata" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/><span style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",background:"rgba(0,0,0,0.18)",fontSize:15}}>▶</span></div>:<div style={{width:sz,height:sz,borderRadius:0,background:"#F3F3F1",border:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><i className="ti ti-video" style={{fontSize:14,color:C.dim}}/></div>;}
+function thumbnailUrl(src,sz=80){
+  if(!src||!src.includes("/storage/v1/object/public/"))return src;
+  const join=src.includes("?")?"&":"?";
+  return src.replace("/storage/v1/object/public/","/storage/v1/render/image/public/")+`${join}width=${Math.max(80,sz*2)}&height=${Math.max(80,sz*2)}&resize=cover&quality=72`;
+}
+function Thumb({src,onClick,sz=40}){return src?<img src={thumbnailUrl(src,sz)} loading="lazy" decoding="async" onError={e=>{if(e.currentTarget.src!==src)e.currentTarget.src=src;}} onClick={onClick} alt="" style={{width:sz,height:sz,borderRadius:0,objectFit:"cover",cursor:onClick?"pointer":"default",border:`1px solid ${C.borderL}`,display:"block",flexShrink:0}}/>:<div style={{width:sz,height:sz,borderRadius:0,background:"#F3F3F1",border:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><i className="ti ti-camera" style={{fontSize:14,color:C.dim}}/></div>;}
+function VideoThumb({src,sz=40,onClick}){return src?<div onClick={onClick} title="Open video" style={{width:sz,height:sz,borderRadius:0,position:"relative",overflow:"hidden",border:`1px solid ${C.borderL}`,background:"#222",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,cursor:onClick?"pointer":"default"}}><i className="ti ti-player-play-filled" style={{fontSize:Math.max(15,sz*.38),color:"#fff"}}/></div>:<div style={{width:sz,height:sz,borderRadius:0,background:"#F3F3F1",border:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><i className="ti ti-video" style={{fontSize:14,color:C.dim}}/></div>;}
 function Cell({col,val,onImg}){
   if(col.t==="img")return <Thumb src={val} onClick={val?()=>onImg(val):undefined}/>;
   if(col.t==="video")return <VideoThumb src={val}/>;
@@ -942,29 +949,56 @@ function Cell({col,val,onImg}){
   const s=String(val);return <span style={{color:C.text,fontSize:13}}>{s.length>55?s.slice(0,55)+"…":s}</span>;
 }
 
-function Uploader({value,onChange,label}){
+function storagePath(file,kind){
+  const ext=(file.name.split(".").pop()||"bin").toLowerCase().replace(/[^a-z0-9]/g,"")||"bin";
+  return `uploads/${kind}/${new Date().toISOString().slice(0,10)}/${crypto.randomUUID()}.${ext}`;
+}
+async function uploadMedia(file,tok,kind){
+  const path=storagePath(file,kind);
+  const encoded=path.split("/").map(encodeURIComponent).join("/");
+  const r=await fetch(`${SB_URL}/storage/v1/object/handsole-media/${encoded}`,{method:"POST",headers:{apikey:SB_KEY,Authorization:`Bearer ${tok}`,"Content-Type":file.type||"application/octet-stream","x-upsert":"false"},body:file});
+  const j=await r.json().catch(()=>null);
+  if(!r.ok)throw new Error(j?.message||j?.error||`Upload failed: ${r.status}`);
+  return `${SB_URL}/storage/v1/object/public/handsole-media/${encoded}`;
+}
+async function compressImage(file){
+  if(!file.type.startsWith("image/")||file.type==="image/gif")return file;
+  const bitmap=await createImageBitmap(file);
+  const scale=Math.min(1,1600/Math.max(bitmap.width,bitmap.height));
+  const canvas=document.createElement("canvas");
+  canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+  canvas.getContext("2d").drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close?.();
+  const blob=await new Promise(resolve=>canvas.toBlob(resolve,"image/webp",.82));
+  return blob?new File([blob],file.name.replace(/\.[^.]+$/,"")+".webp",{type:"image/webp"}):file;
+}
+function Uploader({value,onChange,label,tok}){
   const ref=useRef();
+  const[uploading,setUploading]=useState(false);const[error,setError]=useState("");
+  const pick=async e=>{const original=e.target.files[0];e.target.value="";if(!original)return;setUploading(true);setError("");try{const file=await compressImage(original);onChange(await uploadMedia(file,tok,"images"));}catch(err){setError(err.message||"Upload failed");}finally{setUploading(false);}};
   return <div>
     <div onClick={()=>ref.current.click()} onMouseEnter={e=>e.currentTarget.style.borderColor=C.accent} onMouseLeave={e=>e.currentTarget.style.borderColor=value?C.borderL:C.border}
       style={{width:"100%",height:value?160:80,borderRadius:0,border:`2px dashed ${value?C.borderL:C.border}`,cursor:"pointer",overflow:"hidden",display:"flex",alignItems:"center",justifyContent:"center",background:C.card2,transition:"border-color .15s"}}>
-      {value?<img src={value} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+      {uploading?<div style={{color:C.sub,fontSize:12}}>Optimizing & uploading…</div>:value?<img src={thumbnailUrl(value,320)} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
        :<div style={{textAlign:"left",pointerEvents:"none"}}><i className="ti ti-cloud-upload" style={{fontSize:22,color:C.dim,display:"block",marginBottom:5}}/><span style={{color:C.dim,fontSize:12}}>{label||"Click to upload photo"}</span></div>}
     </div>
+    {error&&<p style={{color:"#DC2626",fontSize:11,margin:"4px 0"}}>{error}</p>}
     {value&&<button onClick={()=>onChange(null)} style={{marginTop:4,background:"none",border:`1px solid ${C.border}`,color:C.dim,borderRadius:0,padding:"3px 10px",cursor:"pointer",fontSize:11}}>Remove</button>}
-    <input ref={ref} type="file" accept="image/*" style={{display:"none"}} onChange={e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>onChange(ev.target.result);r.readAsDataURL(f);e.target.value="";}}/>
+    <input ref={ref} type="file" accept="image/*" style={{display:"none"}} onChange={pick} disabled={uploading}/>
   </div>;
 }
-
-function VideoUploader({value,onChange,label}){
+function VideoUploader({value,onChange,label,tok}){
   const ref=useRef();
+  const[uploading,setUploading]=useState(false);const[error,setError]=useState("");
+  const pick=async e=>{const file=e.target.files[0];e.target.value="";if(!file)return;if(file.size>200*1024*1024){setError("Video must be smaller than 200 MB.");return;}setUploading(true);setError("");try{onChange(await uploadMedia(file,tok,"videos"));}catch(err){setError(err.message||"Upload failed");}finally{setUploading(false);}};
   return <div>
     <div onClick={()=>ref.current.click()} onMouseEnter={e=>e.currentTarget.style.borderColor=C.accent} onMouseLeave={e=>e.currentTarget.style.borderColor=value?C.borderL:C.border}
       style={{width:"100%",height:value?180:90,borderRadius:0,border:`2px dashed ${value?C.borderL:C.border}`,cursor:"pointer",overflow:"hidden",display:"flex",alignItems:"center",justifyContent:"center",background:C.card2,transition:"border-color .15s"}}>
-      {value?<video src={value} controls preload="metadata" style={{width:"100%",height:"100%",objectFit:"cover",background:"#000"}}/>
+      {uploading?<div style={{color:C.sub,fontSize:12}}>Uploading video…</div>:value?<video src={value} controls preload="metadata" style={{width:"100%",height:"100%",objectFit:"cover",background:"#000"}}/>
        :<div style={{textAlign:"left",pointerEvents:"none"}}><i className="ti ti-video-plus" style={{fontSize:24,color:C.dim,display:"block",marginBottom:5}}/><span style={{color:C.dim,fontSize:12}}>{label||"Click to upload video"}</span><span style={{display:"block",color:C.dim,fontSize:10,marginTop:4}}>Accepts video/* formats</span></div>}
     </div>
+    {error&&<p style={{color:"#DC2626",fontSize:11,margin:"4px 0"}}>{error}</p>}
     {value&&<button onClick={()=>onChange(null)} style={{marginTop:4,background:"none",border:`1px solid ${C.border}`,color:C.dim,borderRadius:0,padding:"3px 10px",cursor:"pointer",fontSize:11}}>Remove video</button>}
-    <input ref={ref} type="file" accept="video/*" style={{display:"none"}} onChange={e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>onChange(ev.target.result);r.readAsDataURL(f);e.target.value="";}}/>
+    <input ref={ref} type="file" accept="video/*" style={{display:"none"}} onChange={pick} disabled={uploading}/>
   </div>;
 }
 
@@ -975,6 +1009,14 @@ function VideoLightbox({src,onClose}){return <div onClick={onClose} style={{posi
 // ── Related Select (linked record dropdown) ──────────────────
 function relSelectCols(rel){
   return Array.from(new Set(["id",rel.display,rel.img,...(rel.fields||[])].filter(Boolean))).join(",");
+}
+const REL_CACHE=new Map();
+function loadRelated(sbUrl,tok,rel){
+  const cols=relSelectCols(rel);const key=`${rel.table}?${cols}`;
+  if(!REL_CACHE.has(key))REL_CACHE.set(key,fetch(`${sbUrl}/rest/v1/${rel.table}?select=${cols}&order=id.asc`,{headers:{apikey:SB_KEY,Authorization:`Bearer ${tok}`}})
+    .then(async r=>{const rows=await r.json().catch(()=>null);if(!r.ok)throw new Error(rows?.message||"Related records failed");return Array.isArray(rows)?rows:[];})
+    .catch(err=>{REL_CACHE.delete(key);throw err;}));
+  return REL_CACHE.get(key);
 }
 function relLabel(rel,r){
   if(!r)return "";
@@ -992,15 +1034,7 @@ function RelSelect({fieldKey,label,rel,value,onChange,sbUrl,tok}){
   useEffect(()=>{
     if(!open&&!value)return;
     setLoading(true);
-    fetch(`${sbUrl}/rest/v1/${rel.table}?select=${relSelectCols(rel)}&order=id.asc`,{headers:{"apikey":SB_KEY,"Authorization":`Bearer ${tok}`}})
-      .then(async r=>{
-        const rows=await r.json().catch(()=>null);
-        if(r.ok&&Array.isArray(rows))return rows;
-        // Fallback: if a display/image column name is missing in Supabase, still load linked records.
-        const r2=await fetch(`${sbUrl}/rest/v1/${rel.table}?select=*&order=id.asc`,{headers:{"apikey":SB_KEY,"Authorization":`Bearer ${tok}`}});
-        const rows2=await r2.json().catch(()=>null);
-        return Array.isArray(rows2)?rows2:[];
-      }).then(rows=>{setRecs(Array.isArray(rows)?rows:[]);}).catch(()=>{}).finally(()=>setLoading(false));
+    loadRelated(sbUrl,tok,rel).then(rows=>setRecs(rows)).catch(()=>{}).finally(()=>setLoading(false));
   },[open,value,rel.table,rel.display,rel.img]);
   useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);},[]);
   const searchText=r=>[r.id,rel.display&&r[rel.display],rel.img&&r[rel.img],...(rel.fields||[]).map(f=>r[f])].filter(Boolean).join(" ").toLowerCase();
@@ -1048,8 +1082,8 @@ function FormField({fk,label,value,onChange,sbUrl,tok,allData}){
       {fk==="balance_payment"&&allData?(()=>{const b=(Number(allData.total_sales_price)||0)-(Number(allData.advance_payment)||0);return b?`₨ ${b.toLocaleString()}`:"Auto-calculated";})():value||"—"}
     </div>;
 
-  if(cfg.t==="img")  return <Uploader value={value} onChange={onChange} label={`Upload ${label}`}/>;
-  if(cfg.t==="video")return <VideoUploader value={value} onChange={onChange} label={`Upload ${label}`}/>;
+  if(cfg.t==="img")  return <Uploader value={value} onChange={onChange} label={`Upload ${label}`} tok={tok}/>;
+  if(cfg.t==="video")return <VideoUploader value={value} onChange={onChange} label={`Upload ${label}`} tok={tok}/>;
   if(cfg.t==="rel")  return <RelSelect fieldKey={fk} label={label} rel={cfg.rel} value={value} onChange={onChange} sbUrl={sbUrl} tok={tok}/>;
   // Some material inventory sizes are physical measurements, not shoe sizes. Allow free text for sheet inches and leather sq ft values.
   if(fk==="size" && /inch|sheet|sq\s*ft|sqft|square/i.test(label)) return <input type="text" value={value||""} onChange={e=>onChange(e.target.value)} placeholder={/sq\s*ft|sqft|square/i.test(label)?"e.g. 12 sq ft, 10.5 sq ft, Custom":"e.g. 24x36, 22 x 38, 12 inch"} style={C.inp}/>;
@@ -1539,7 +1573,7 @@ function loadImageForAnalysis(src){
 }
 
 
-async async function callAiVisionRecognizer(kind,form={}){
+async function callAiVisionRecognizer(kind,form={}){
   if(!form.image_url){
     throw new Error("Upload an image first, then click Analyze.");
   }
@@ -5431,18 +5465,16 @@ export default function HandsoleApp(){
   const api=()=>sbApi(SB_URL,SB_KEY);
 
   const fetchAllCounts=async(tok)=>{
-    const entries=Object.entries(TABLE_MAP).filter(([k])=>k!=="__access");
-    const results=await Promise.all(
-      entries.map(async([modId,table])=>{
-        const n=await api().count(table,tok);
-        return[modId,n];
-      })
-    );
-    setTabCounts(Object.fromEntries(results));
+    try{setTabCounts(await api().counts(tok));}
+    catch(e){
+      console.warn("Count RPC unavailable; using loaded table counts.",e);
+      setTabCounts(prev=>({...prev,...Object.fromEntries(Object.entries(data).filter(([,rows])=>Array.isArray(rows)).map(([id,rows])=>[id,rows.length]))}));
+    }
   };
 
-  const loadMod=async(id)=>{
+  const loadMod=async(id,{force=false}={})=>{
     if(!session||!TABLE_MAP[id])return;
+    if(!force&&Array.isArray(data[id]))return;
     setLoadingMod(id);
     try{const rows=await api().list(TABLE_MAP[id],session.token);if(Array.isArray(rows))setData(d=>({...d,[id]:rows}));}
     catch(e){console.error(e);}
@@ -5777,7 +5809,7 @@ if(table==="rubber_laser_sole"&&m[1]==="status"){
         }else if(usageResult?.errors?.length){
           alert(`Work Order saved. Material Usage Log created ${usageResult.logged}/${usageResult.attempted} rows. Some material updates were skipped: ${usageResult.errors[0]}`);
         }
-        await loadMod("material_usage");
+        await loadMod("material_usage",{force:true});
       }
       if(row){
         const displayRow=active==="upper_leather"?{...rest,...row,color:row.color??rest.color}
@@ -5884,7 +5916,7 @@ if(table==="rubber_laser_sole"&&m[1]==="status"){
       </div>
       <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
         {active==="__access"?<AccessControl sbUrl={SB_URL} tok={session?.token} currentUser={session?.user}/>
-        :active==="__import"?<ImportScreen tok={session?.token} onImported={(id)=>{fetchAllCounts(session.token);loadMod(id);}}/>
+        :active==="__import"?<ImportScreen tok={session?.token} onImported={(id)=>{fetchAllCounts(session.token);loadMod(id,{force:true});}}/>
         :active==="dashboard"?<Dashboard data={{...data,_user:session?.user}} onNavigate={setActive}/>
         :<DataTable modId={active} rows={rows} tok={session?.token} onAdd={()=>setModal({item:null})} onEdit={row=>setModal({item:row})} onDelete={deleteRows} loading={loadingMod===active}/>}
       </div>
