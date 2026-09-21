@@ -11,6 +11,15 @@ function sbApi(url,key){
     signIn:(e,p)=>fetch(`${url}/auth/v1/token?grant_type=password`,{method:"POST",headers:h(),body:JSON.stringify({email:e,password:p})}).then(r=>r.json()),
     signOut:tok=>fetch(`${url}/auth/v1/logout`,{method:"POST",headers:h(tok)}),
     list:(table,tok)=>fetch(`${url}/rest/v1/${table}?select=*&order=id.desc`,{headers:h(tok)}).then(r=>r.json()),
+    listPage:(table,tok,from=0,to=99)=>fetch(`${url}/rest/v1/${table}?select=*&order=id.desc`,{
+      headers:{...h(tok),"Prefer":"count=exact","Range":`${from}-${to}`}
+    }).then(async r=>{
+      const rows=await r.json().catch(()=>null);
+      if(!r.ok)throw new Error(rows?.message||rows?.details||`Load failed: ${r.status}`);
+      const range=r.headers.get("content-range")||"";
+      const total=Number(range.split("/")[1]);
+      return{rows:Array.isArray(rows)?rows:[],total:Number.isFinite(total)?total:(Array.isArray(rows)?rows.length:0)};
+    }),
     insert:(table,rec,tok)=>fetch(`${url}/rest/v1/${table}`,{method:"POST",headers:{...h(tok),"Prefer":"return=representation"},body:JSON.stringify(rec)}).then(async r=>{const j=await r.json().catch(()=>null);if(!r.ok)throw new Error(j?.message||j?.details||`Insert failed: ${r.status}`);return j;}),
     update:(table,id,rec,tok)=>fetch(`${url}/rest/v1/${table}?id=eq.${id}`,{method:"PATCH",headers:{...h(tok),"Prefer":"return=representation"},body:JSON.stringify(rec)}).then(async r=>{const j=await r.json().catch(()=>null);if(!r.ok)throw new Error(j?.message||j?.details||`Update failed: ${r.status}`);return j;}),
     remove:(table,ids,tok)=>{
@@ -5178,7 +5187,26 @@ export default function HandsoleApp(){
     if(!session||!TABLE_MAP[id])return;
     if(!force&&Array.isArray(data[id]))return;
     setLoadingMod(id);
-    try{const rows=await api().list(TABLE_MAP[id],session.token);if(Array.isArray(rows))setData(d=>({...d,[id]:rows}));}
+    try{
+      const client=api(),table=TABLE_MAP[id],batchSize=200;
+      const first=await client.listPage(table,session.token,0,99);
+      setData(d=>({...d,[id]:first.rows}));
+      setTabCounts(prev=>({...prev,[id]:first.total}));
+      setLoadingMod(null);
+
+      // Preserve the existing all-record filters, but do not block the screen
+      // while the remaining rows arrive in controlled background batches.
+      for(let from=100;from<first.total;from+=batchSize){
+        const pageResult=await client.listPage(table,session.token,from,Math.min(from+batchSize-1,first.total-1));
+        if(!pageResult.rows.length)break;
+        setData(d=>{
+          const current=Array.isArray(d[id])?d[id]:[];
+          const known=new Set(current.map(row=>String(row.id)));
+          const additions=pageResult.rows.filter(row=>!known.has(String(row.id)));
+          return additions.length?{...d,[id]:[...current,...additions]}:d;
+        });
+      }
+    }
     catch(e){console.error(e);}
     setLoadingMod(null);
   };
