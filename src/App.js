@@ -415,7 +415,6 @@ const NAV=[
     {id:"customers",    l:"Customer",              i:"ti-users"},
     {id:"measurements", l:"Customer Measurement",  i:"ti-ruler"},
     {id:"production",   l:"Production Planning",   i:"ti-calendar-event"},
-    {id:"__import",     l:"Import CSV Data",       i:"ti-database-import"},
   ]},
   {g:"Inventory",   icon:"ti-chart-bar", items:[
     {id:"inventory", l:"Pair",  i:"ti-package"},
@@ -665,155 +664,6 @@ const COLS={
   leather_board:[{k:"id",l:"Leather Board #",w:118,t:"leather_board_num"},IMG,{k:"name_type",l:"Name / Type",w:180},{k:"status",l:"Status",w:115,t:"badge"}],
   extra_saman:[ID,IMG,{k:"video_url",l:"Video",w:52,t:"video"},{k:"name",l:"Name",w:150},{k:"usage",l:"Usage",w:110,t:"badge"},{k:"material_type",l:"Material",w:120,t:"badge"},{k:"location_storage",l:"Location",w:100},{k:"quantity",l:"Qty",w:60,t:"num"},{k:"notes",l:"Notes",w:190}],
 };
-
-// ── CSV Import Screen ───────────────────────────────────────
-function parseCSVText(text){
-  const rows=[];let row=[];let cur="";let q=false;
-  for(let i=0;i<text.length;i++){
-    const ch=text[i],nx=text[i+1];
-    if(ch==='"'){
-      if(q&&nx==='"'){cur+='"';i++;}
-      else q=!q;
-    }else if(ch===","&&!q){row.push(cur);cur="";}
-    else if((ch==="\n"||ch==="\r")&&!q){
-      if(ch==="\r"&&nx==="\n")i++;
-      row.push(cur);cur="";
-      if(row.some(v=>String(v).trim()!==""))rows.push(row);
-      row=[];
-    }else cur+=ch;
-  }
-  row.push(cur);
-  if(row.some(v=>String(v).trim()!==""))rows.push(row);
-  if(!rows.length)return{headers:[],rows:[]};
-  const headers=rows[0].map(h=>String(h||"").trim());
-  return{headers,rows:rows.slice(1).map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??""])))};
-}
-function normKey(v){return String(v||"").toLowerCase().replace(/&/g,"and").replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"");}
-function extractFirstUrl(v){const s=String(v||"");const m=s.match(/https?:\/\/[^\s,)]+/);return m?m[0]:s.trim();}
-function toISODate(v){
-  const s=String(v||"").trim();if(!s)return null;
-  if(/^\d{4}-\d{2}-\d{2}/.test(s))return s.slice(0,10);
-  const m=s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
-  if(m){let y=m[3].length===2?`20${m[3]}`:m[3];return `${y}-${String(m[1]).padStart(2,"0")}-${String(m[2]).padStart(2,"0")}`;}
-  const d=new Date(s);return Number.isNaN(d.getTime())?s:d.toISOString().slice(0,10);
-}
-function cleanImportValue(v,field){
-  const raw=String(v??"").trim();if(raw==="")return null;
-  if(field.t==="img"||field.t==="video")return extractFirstUrl(raw);
-  if(field.t==="bool")return /^(yes|true|1|done|active|available)$/i.test(raw);
-  if(field.t==="num"||["money"].includes(field.t)){const n=Number(raw.replace(/[^0-9.\-]/g,""));return Number.isFinite(n)?n:null;}
-  if(field.t==="date")return toISODate(raw);
-  if(field.k==="id")return null;
-  return raw;
-}
-function fieldListForMod(modId){
-  const sec=(SECTIONS[modId]||[]).flatMap(s=>s.f||[]);
-  const col=(COLS[modId]||[]).map(c=>({k:c.k,l:c.l||c.k,t:c.t}));
-  const seen=new Set();
-  return [...sec,...col].map(f=>resolveField(f.k,f.l||f.k)).filter(f=>{
-    if(!f.k||seen.has(f.k)||f.k==="id")return false;seen.add(f.k);return true;
-  });
-}
-function guessField(header,fields){
-  const h=normKey(header);
-  const alias={
-    photo:"image_url",picture:"image_url",image:"image_url",reference_images:"image_url",reference_image:"image_url",fault:"fault_image_url",receipt:"receipt_url",
-    db:"id",db_number:"id",db_no:"id",entry:"entry_number",entry_number:"entry_number",
-    customer:"customer_name",customer_name:"customer_name",name:"name",full_name:"customer_name",
-    amount:"amount_received",amount_received:"amount_received",payment:"payment_type",payment_type:"payment_type",date_received:"date_received",
-    type_of_inspiration:"type_of_inspiration",design_type:"design_type",tag:"tags",tags:"tags",
-    point:"knowledge_point",category:"knowledge_category",knowledge_category:"knowledge_category",info:"point_info",
-    rule:"rule_number",rule_number:"rule_number",description:"rule_description",
-    fault_area:"fault_area",fault_type_description:"fault_type",fault_type:"fault_type",is_critical_fault:"is_critical",critical:"is_critical",fault_status:"fault_status",
-    heel_id:"id",heel_type:"heel_type",type_thickness:"thickness_type",thickness_type:"thickness_type",
-    rubber_heel_top_id:"id",heel_top_id:"id",serial_no:"serial_no",serial:"serial_no",quantity_in_pairs:"quantity_in_pairs",date_added:"date_added",thickness_mm:"thickness_mm",
-    stock_count:"stock_count",serial_number:"serial_no",serial_no:"serial_no",farma:"farma_id",farma_number:"farma_id",size:"size",
-    video:"video_url",video_upload:"video_url",upload_date:"upload_date",video_type:"video_type",status:"status",
-    material_type:"material_type",usage:"usage",location:"location_storage",location_storage:"location_storage",qty:"quantity",quantity:"quantity",
-    unit_type:"unit_type",date_purchased:"date_purchased",notes:"notes",color:"color",code:"code"
-  };
-  if(alias[h]&&fields.some(f=>f.k===alias[h]))return alias[h];
-  let exact=fields.find(f=>normKey(f.k)===h||normKey(f.l)===h);if(exact)return exact.k;
-  return "";
-}
-function ImportScreen({tok,onImported}){
-  const mods=ALL_NAV.filter(i=>TABLE_MAP[i.id]&&!i.id.startsWith("__"));
-  const[startMod,setStartMod]=useState("work_orders");
-  const[fileName,setFileName]=useState("");
-  const[headers,setHeaders]=useState([]);
-  const[rows,setRows]=useState([]);
-  const[mapping,setMapping]=useState({});
-  const[busy,setBusy]=useState(false);
-  const[msg,setMsg]=useState("");
-  const fields=fieldListForMod(startMod);
-  const onFile=e=>{
-    const f=e.target.files?.[0];if(!f)return;
-    setFileName(f.name);setMsg("");
-    const r=new FileReader();
-    r.onload=ev=>{
-      const parsed=parseCSVText(String(ev.target.result||""));
-      setHeaders(parsed.headers);setRows(parsed.rows);
-      const next={};parsed.headers.forEach(h=>{next[h]=guessField(h,fields);});
-      setMapping(next);
-    };
-    r.readAsText(f);
-    e.target.value="";
-  };
-  useEffect(()=>{if(!headers.length)return;const next={};headers.forEach(h=>{next[h]=mapping[h]&&fields.some(f=>f.k===mapping[h])?mapping[h]:guessField(h,fields);});setMapping(next);},[startMod]);
-  const preview=rows.slice(0,5);
-  const mappedCount=headers.filter(h=>mapping[h]).length;
-  const importNow=async()=>{
-    if(!rows.length){setMsg("Upload a CSV first.");return;}
-    const table=TABLE_MAP[startMod];
-    const fieldByKey=Object.fromEntries(fields.map(f=>[f.k,f]));
-    const records=rows.map(r=>{
-      const rec={};
-      headers.forEach(h=>{
-        const key=mapping[h];if(!key||key==="id")return;
-        const f=fieldByKey[key]||resolveField(key,key);
-        const val=cleanImportValue(r[h],f);
-        if(val!==null&&val!==undefined&&val!=="")rec[key]=val;
-      });
-      return rec;
-    }).filter(r=>Object.keys(r).length>0);
-    if(!records.length){setMsg("No mapped fields to import.");return;}
-    setBusy(true);setMsg("");
-    try{
-      let done=0;
-      for(let i=0;i<records.length;i+=100){
-        const chunk=records.slice(i,i+100);
-        const res=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{apikey:SB_KEY,Authorization:`Bearer ${tok}`,"Content-Type":"application/json",Prefer:"return=minimal"},body:JSON.stringify(chunk)});
-        if(!res.ok){const j=await res.json().catch(()=>null);throw new Error(j?.message||j?.details||`Import failed: ${res.status}`);}
-        done+=chunk.length;
-      }
-      setMsg(`Imported ${done} records into ${mods.find(m=>m.id===startMod)?.l||startMod}.`);
-      onImported?.(startMod);
-    }catch(e){console.error(e);setMsg(`Import failed: ${e.message||e}`);}finally{setBusy(false);}
-  };
-  return <div style={{height:"100%",overflow:"auto",padding:24,background:C.bg}}>
-    <div style={{background:C.card,border:`1px solid ${C.border}`,padding:22,maxWidth:1180,margin:"0 auto"}}>
-      <div style={{display:"flex",alignItems:"flex-start",gap:16,marginBottom:18}}>
-        <div style={{width:42,height:42,background:C.accentD,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${C.border}`}}><i className="ti ti-database-import" style={{fontSize:22,color:C.accent}}/></div>
-        <div style={{flex:1}}><h2 style={{margin:"0 0 4px",fontSize:24}}>Import CSV Data</h2><p style={{margin:0,color:C.sub,fontSize:13}}>Upload a CSV, choose the destination table, review field mapping, then import records into Supabase.</p></div>
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:16}}>
-        <div><label style={{fontSize:11,fontWeight:800,letterSpacing:".12em",color:C.sub,textTransform:"uppercase",display:"block",marginBottom:6}}>Destination Table</label><select value={startMod} onChange={e=>setStartMod(e.target.value)} style={C.inp}>{mods.map(m=><option key={m.id} value={m.id}>{m.l}</option>)}</select></div>
-        <div><label style={{fontSize:11,fontWeight:800,letterSpacing:".12em",color:C.sub,textTransform:"uppercase",display:"block",marginBottom:6}}>CSV File</label><label style={{...C.inp,display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}><i className="ti ti-upload"/> {fileName||"Choose CSV file"}<input type="file" accept=".csv,text/csv" onChange={onFile} style={{display:"none"}}/></label></div>
-      </div>
-      {headers.length>0&&<>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",borderTop:`1px solid ${C.border}`,paddingTop:16,marginTop:6}}>
-          <div><b>{rows.length}</b> rows found · <b>{mappedCount}</b> columns mapped</div>
-          <button onClick={importNow} disabled={busy} style={{background:C.accent,border:"none",padding:"10px 18px",fontWeight:800,cursor:busy?"not-allowed":"pointer",color:"#111"}}>{busy?"Importing…":"Import Records"}</button>
-        </div>
-        <h3 style={{fontSize:13,letterSpacing:".1em",textTransform:"uppercase",color:C.sub,margin:"18px 0 10px"}}>Field Mapping</h3>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(2,minmax(0,1fr))",gap:10}}>{headers.map(h=><div key={h} style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,alignItems:"center",border:`1px solid ${C.border}`,padding:8}}><span style={{fontSize:12,color:C.sub,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{h}</span><select value={mapping[h]||""} onChange={e=>setMapping(m=>({...m,[h]:e.target.value}))} style={{...C.inp,padding:"7px 8px",fontSize:12}}><option value="">Do not import</option>{fields.map(f=><option key={f.k} value={f.k}>{f.l||f.k} ({f.k})</option>)}</select></div>)}</div>
-        <h3 style={{fontSize:13,letterSpacing:".1em",textTransform:"uppercase",color:C.sub,margin:"18px 0 10px"}}>Preview</h3>
-        <div style={{overflow:"auto",border:`1px solid ${C.border}`}}><table style={{borderCollapse:"collapse",width:"100%"}}><thead><tr>{headers.slice(0,8).map(h=><th key={h} style={{textAlign:"left",fontSize:11,color:C.sub,padding:8,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead><tbody>{preview.map((r,i)=><tr key={i}>{headers.slice(0,8).map(h=><td key={h} style={{fontSize:12,padding:8,borderBottom:`1px solid ${C.border}`,maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(r[h]??"")}</td>)}</tr>)}</tbody></table></div>
-      </>}
-      {msg&&<div style={{marginTop:16,padding:12,border:`1px solid ${msg.startsWith("Import failed")?"#FCA5A5":C.border}`,background:msg.startsWith("Import failed")?"#FEF2F2":"#F0FDF4",color:msg.startsWith("Import failed")?"#B91C1C":"#166534",fontSize:13}}>{msg}</div>}
-    </div>
-  </div>;
-}
 
 // ── Small UI helpers ─────────────────────────────────────────
 function badge(v){const s=(v||"").toString().toLowerCase();if(["available","in stock","completed","done","resolved","ready","laser done","pass","active","good"].some(x=>s.includes(x)))return C.badges.green;if(["transit","shipped","progress","hold","planning","draft","assigned","fair","move to production","move to laser","production","laser"].some(x=>s.includes(x)))return C.badges.amber;if(["open","critical","unfinish","overdue","fail","retired","poor"].some(x=>s.includes(x)))return C.badges.red;if(["pending","new","high"].some(x=>s.includes(x)))return C.badges.blue;return C.badges.gray;}
@@ -5196,7 +5046,7 @@ export default function HandsoleApp(){
   useEffect(()=>{
     if(!session)return;
     if(active==="dashboard")["work_orders","customers","inventory","income"].forEach(loadMod);
-    else if(active!=="__import"&&active!=="__access")loadMod(active);
+    else if(active!=="__access")loadMod(active);
   },[active,session]);
 
   useEffect(()=>{
@@ -5619,14 +5469,13 @@ if(table==="rubber_laser_sole"&&m[1]==="status"){
           <span style={{color:C.dim,opacity:0.4,fontSize:13}}>›</span>
           <span style={{color:C.text,fontSize:13,fontWeight:600}}>{active==="dashboard"?"Dashboard":curItem?.l||""}</span>
         </div>
-        {active!=="dashboard"&&active!=="__import"&&active!=="__access"&&
+        {active!=="dashboard"&&active!=="__access"&&
           <button onClick={()=>setModal({item:null})} style={{display:"flex",alignItems:"center",gap:6,background:C.accent,color:"#111",border:"none",borderRadius:0,padding:"8px 16px",cursor:"pointer",fontSize:13,fontWeight:700}}>
             <i className="ti ti-plus" style={{fontSize:14}}/> New Record
           </button>}
       </div>
       <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
         {active==="__access"?<AccessControl sbUrl={SB_URL} tok={session?.token} currentUser={session?.user}/>
-        :active==="__import"?<ImportScreen tok={session?.token} onImported={(id)=>{fetchAllCounts(session.token);loadMod(id,{force:true});}}/>
         :active==="dashboard"?<Dashboard data={{...data,_user:session?.user}} onNavigate={setActive}/>
         :<DataTable modId={active} rows={rows} tok={session?.token} onAdd={()=>setModal({item:null})} onEdit={row=>setModal({item:row})} onDelete={deleteRows} loading={loadingMod===active}/>}
       </div>
