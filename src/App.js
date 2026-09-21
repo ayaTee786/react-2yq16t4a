@@ -780,6 +780,11 @@ function upperRowMatchesFarma(row,target){
   return vals.some(v=>aliases.some(a=>v===a||v.includes(a)));
 }
 
+function firstRowImage(row){
+  if(!row)return "";
+  const gallery=Array.isArray(row.image_urls)?row.image_urls:[];
+  return gallery.find(Boolean)||row.image_url||row.representative_image_url||row.fault_image_url||row.receipt_url||row.foot_img_left||row.quality_fault_image_url||"";
+}
 function thumbnailUrl(src,sz=80){
   if(!src||!src.includes("/storage/v1/object/public/"))return src;
   const join=src.includes("?")?"&":"?";
@@ -2864,6 +2869,22 @@ function DataTable({modId,rows,onAdd,onEdit,onDelete,loading,tok}){
   const totalPages=Math.max(1,Math.ceil(total/pageSize));
   const safePage=Math.min(page,totalPages);
   const pageRows=filtered.slice((safePage-1)*pageSize,safePage*pageSize);
+  const nextPageRows=filtered.slice(safePage*pageSize,(safePage+1)*pageSize);
+  const nextImageUrls=nextPageRows.map(firstRowImage).filter(Boolean).slice(0,12);
+  const nextImageKey=nextImageUrls.join("|");
+
+  // Warm only the next page's small thumbnails while the browser is idle.
+  // This makes paging feel immediate without downloading every table image.
+  useEffect(()=>{
+    if(!nextImageUrls.length)return;
+    const warm=()=>nextImageUrls.forEach(src=>{const img=new Image();img.decoding="async";img.src=thumbnailUrl(src,40);});
+    if("requestIdleCallback" in window){
+      const id=window.requestIdleCallback(warm,{timeout:2500});
+      return()=>window.cancelIdleCallback(id);
+    }
+    const id=window.setTimeout(warm,600);
+    return()=>window.clearTimeout(id);
+  },[nextImageKey]);
 
   // ── Selection ──
   const pageIds=pageRows.map(r=>r.id).filter(Boolean);
